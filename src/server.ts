@@ -1,8 +1,8 @@
 /**
  * SalitAI.orbit Backend
  * File: server.ts
- * Version: 2.1.1
- * Purpose: ElevenLabs STT + Gemini Minutes + Contact Email API (Gmail App Password).
+ * Version: 2.3.0
+ * Purpose: Deepgram STT + Gemini Minutes + Contact Email API (Gmail App Password).
  * Notes:
  * - Render-ready: uses process.env (no hardcoded .env path)
  * - CORS: allows localhost + ALLOWED_ORIGINS (comma-separated) for Vercel
@@ -15,6 +15,7 @@ import dotenv from "dotenv";
 import multer from "multer";
 import nodemailer from "nodemailer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { createClient } from "@deepgram/sdk";
 
 dotenv.config();
 
@@ -24,7 +25,10 @@ dotenv.config();
 
 const PORT = Number(process.env.PORT ?? 8082);
 
-const ELEVENLABS_API_KEY = String(process.env.ELEVENLABS_API_KEY ?? "").trim();
+const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY ?? "").trim();
+const DEEPGRAM_MODEL = String(process.env.DEEPGRAM_MODEL ?? "nova-2").trim();
+const DEEPGRAM_LANGUAGE = String(process.env.DEEPGRAM_LANGUAGE ?? "").trim();
+
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY ?? "").trim();
 const GEMINI_MODEL = String(process.env.GEMINI_MODEL ?? "auto").trim();
 
@@ -38,8 +42,8 @@ const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-if (!ELEVENLABS_API_KEY) {
-  console.error("Missing ELEVENLABS_API_KEY in environment variables.");
+if (!DEEPGRAM_API_KEY) {
+  console.error("Missing DEEPGRAM_API_KEY in environment variables.");
   process.exit(1);
 }
 if (!GEMINI_API_KEY) {
@@ -159,8 +163,16 @@ function escape_html(input: string): string {
 }
 
 /* ============================= */
-/* ELEVENLABS STT                */
+/* DEEPGRAM STT                  */
 /* ============================= */
+
+const deepgram = createClient(DEEPGRAM_API_KEY);
+
+function pick_transcript(result: any): string {
+  const transcript =
+    result?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
+  return String(transcript).trim();
+}
 
 app.post(
   "/api/stt",
@@ -174,33 +186,24 @@ app.post(
         });
       }
 
-      const form = new FormData();
-      const mime = file.mimetype || "application/octet-stream";
-      const bytes = new Uint8Array(file.buffer);
+      // Pre-recorded transcription (send the file bytes). :contentReference[oaicite:1]{index=1}
+      // smart_format already enables punctuation. :contentReference[oaicite:2]{index=2}
+      const { result, error } =
+        await deepgram.listen.prerecorded.transcribeFile(file.buffer, {
+          model: DEEPGRAM_MODEL, // e.g. nova-2 :contentReference[oaicite:3]{index=3}
+          smart_format: true,
+          ...(DEEPGRAM_LANGUAGE ? { language: DEEPGRAM_LANGUAGE } : {}),
+        });
 
-      form.append(
-        "file",
-        new Blob([bytes], { type: mime }),
-        file.originalname || "audio",
-      );
-      form.append("model_id", "scribe_v1");
-
-      const r = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
-        method: "POST",
-        headers: { "xi-api-key": ELEVENLABS_API_KEY },
-        body: form as any,
-      });
-
-      if (!r.ok) {
-        const txt = await r.text().catch(() => "");
+      if (error) {
         return res.status(500).json({
-          error: `ElevenLabs STT failed (${r.status}): ${txt || r.statusText}`,
+          error: `Deepgram STT failed: ${error.message ?? "unknown error"}`,
         });
       }
 
-      const data: any = await r.json().catch(() => ({}));
-      return res.json({ text: String(data?.text || "") });
+      return res.json({ text: pick_transcript(result) });
     } catch (e: any) {
+      console.error("DEEPGRAM STT ERROR:", e);
       return res.status(500).json({ error: e?.message ?? "STT failed" });
     }
   },
