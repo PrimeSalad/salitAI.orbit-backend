@@ -1,8 +1,12 @@
 /**
  * SalitAI.orbit Backend
  * File: server.ts
- * Version: 2.1.0
+ * Version: 2.1.1
  * Purpose: ElevenLabs STT + Gemini Minutes + Contact Email API (Gmail App Password).
+ * Notes:
+ * - Render-ready: uses process.env (no hardcoded .env path)
+ * - CORS: allows localhost + ALLOWED_ORIGINS (comma-separated) for Vercel
+ * - Binds to 0.0.0.0 for hosting platforms
  */
 
 import express, { type Request, type Response } from "express";
@@ -12,7 +16,7 @@ import multer from "multer";
 import nodemailer from "nodemailer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-dotenv.config({ path: "../.env" });
+dotenv.config();
 
 /* ============================= */
 /* ENV                           */
@@ -29,12 +33,17 @@ const SMTP_USER = String(process.env.SMTP_USER ?? "").trim();
 const SMTP_PASS = String(process.env.SMTP_PASS ?? "").trim();
 const CONTACT_TO_EMAIL = String(process.env.CONTACT_TO_EMAIL ?? "").trim();
 
+const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 if (!ELEVENLABS_API_KEY) {
-  console.error("Missing ELEVENLABS_API_KEY in root .env");
+  console.error("Missing ELEVENLABS_API_KEY in environment variables.");
   process.exit(1);
 }
 if (!GEMINI_API_KEY) {
-  console.error("Missing GEMINI_API_KEY in root .env");
+  console.error("Missing GEMINI_API_KEY in environment variables.");
   process.exit(1);
 }
 
@@ -47,9 +56,16 @@ const app = express();
 app.use(
   cors({
     origin: (origin, cb) => {
+      // Allow server-to-server / curl / Postman (no Origin header)
       if (!origin) return cb(null, true);
+
+      // Allow any localhost port for dev
       if (/^http:\/\/localhost:\d+$/.test(origin)) return cb(null, true);
-      return cb(null, false);
+
+      // Allow explicit production origins (Vercel domains, custom domains)
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+
+      return cb(new Error(`CORS blocked for origin: ${origin}`), false);
     },
     credentials: false,
   }),
@@ -100,7 +116,7 @@ app.post("/api/contact", async (req: Request, res: Response) => {
     if (!mailer) {
       return res.status(500).json({
         message:
-          "Email is not configured. Please set SMTP_USER, SMTP_PASS, CONTACT_TO_EMAIL in ROOT .env.",
+          "Email is not configured. Please set SMTP_USER, SMTP_PASS, CONTACT_TO_EMAIL in environment variables.",
       });
     }
 
@@ -277,6 +293,6 @@ ${transcript}
 /* START                         */
 /* ============================= */
 
-app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Backend running on port ${PORT}`);
 });
