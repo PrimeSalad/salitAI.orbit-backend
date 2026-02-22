@@ -1,12 +1,13 @@
 /**
  * SalitAI.orbit Backend
  * File: server.ts
- * Version: 2.3.0
- * Purpose: Deepgram STT + Gemini Minutes + Contact Email API (Gmail App Password).
+ * Version: 2.5.1
+ * Purpose: Gemini Audio Transcription (STT) + Gemini Minutes + Contact Email API
  * Notes:
- * - Render-ready: uses process.env (no hardcoded .env path)
+ * - Render-ready: uses process.env
  * - CORS: allows localhost + ALLOWED_ORIGINS (comma-separated) for Vercel
  * - Binds to 0.0.0.0 for hosting platforms
+ * - Free-tier friendly: auto-picks an available model that supports generateContent
  */
 
 import express, { type Request, type Response } from "express";
@@ -15,7 +16,6 @@ import dotenv from "dotenv";
 import multer from "multer";
 import nodemailer from "nodemailer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { createClient } from "@deepgram/sdk";
 
 dotenv.config();
 
@@ -25,29 +25,29 @@ dotenv.config();
 
 const PORT = Number(process.env.PORT ?? 8082);
 
-const DEEPGRAM_API_KEY = String(process.env.DEEPGRAM_API_KEY ?? "").trim();
-const DEEPGRAM_MODEL = String(process.env.DEEPGRAM_MODEL ?? "nova-2").trim();
-const DEEPGRAM_LANGUAGE = String(process.env.DEEPGRAM_LANGUAGE ?? "").trim();
-
+// Gemini
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY ?? "").trim();
-const GEMINI_MODEL = String(process.env.GEMINI_MODEL ?? "auto").trim();
 
+// Optional preferred model names (may be unavailable on free tier => auto fallback)
+const GEMINI_MODEL_STT = String(process.env.GEMINI_MODEL_STT ?? "").trim();
+const GEMINI_MODEL_MINUTES = String(
+  process.env.GEMINI_MODEL_MINUTES ?? "",
+).trim();
+
+// CORS
+const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+// Email
 const SMTP_SERVICE = String(process.env.SMTP_SERVICE ?? "gmail").trim();
 const SMTP_USER = String(process.env.SMTP_USER ?? "").trim();
 const SMTP_PASS = String(process.env.SMTP_PASS ?? "").trim();
 const CONTACT_TO_EMAIL = String(process.env.CONTACT_TO_EMAIL ?? "").trim();
 
-const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS ?? "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-if (!DEEPGRAM_API_KEY) {
-  console.error("Missing DEEPGRAM_API_KEY in environment variables.");
-  process.exit(1);
-}
 if (!GEMINI_API_KEY) {
-  console.error("Missing GEMINI_API_KEY in environment variables.");
+  console.error("Missing GEMINI_API_KEY");
   process.exit(1);
 }
 
@@ -60,162 +60,45 @@ const app = express();
 app.use(
   cors({
     origin: (origin, cb) => {
-      // Allow server-to-server / curl / Postman (no Origin header)
+      // allow server-to-server / curl / Postman
       if (!origin) return cb(null, true);
 
-      // Allow any localhost port for dev
+      // allow localhost dev
       if (/^http:\/\/localhost:\d+$/.test(origin)) return cb(null, true);
 
-      // Allow explicit production origins (Vercel domains, custom domains)
+      // IMPORTANT: allowed origins must be exact, no trailing slash
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
 
-      return cb(new Error(`CORS blocked for origin: ${origin}`), false);
+      return cb(new Error(`CORS blocked: ${origin}`));
     },
     credentials: false,
   }),
 );
 
+app.options("*", cors());
 app.use(express.json({ limit: "10mb" }));
 
-const upload = multer({ storage: multer.memoryStorage() });
-
-/* ============================= */
-/* HEALTH                        */
-/* ============================= */
-
-app.get("/health", (_req: Request, res: Response) =>
-  res.json({ status: 200, message: "ok" }),
-);
-app.get("/api/health", (_req: Request, res: Response) =>
-  res.json({ status: 200, message: "ok" }),
-);
-
-/* ============================= */
-/* EMAIL TRANSPORTER             */
-/* ============================= */
-
-function create_mailer() {
-  if (!SMTP_USER || !SMTP_PASS || !CONTACT_TO_EMAIL) {
-    return null;
-  }
-
-  // Using "service: gmail" avoids TS typing issues and is simpler.
-  return nodemailer.createTransport({
-    service: SMTP_SERVICE,
-    auth: {
-      user: SMTP_USER,
-      pass: SMTP_PASS,
-    },
-  });
-}
-
-const mailer = create_mailer();
-
-/* ============================= */
-/* CONTACT ROUTE                 */
-/* ============================= */
-
-app.post("/api/contact", async (req: Request, res: Response) => {
-  try {
-    if (!mailer) {
-      return res.status(500).json({
-        message:
-          "Email is not configured. Please set SMTP_USER, SMTP_PASS, CONTACT_TO_EMAIL in environment variables.",
-      });
-    }
-
-    const name = String(req.body?.name ?? "").trim();
-    const email = String(req.body?.email ?? "").trim();
-    const message = String(req.body?.message ?? "").trim();
-
-    if (!name || !email || !message) {
-      return res.status(400).json({ message: "Missing required fields" });
-    }
-
-    await mailer.sendMail({
-      from: `"SalitAI.orbit Contact" <${SMTP_USER}>`,
-      to: CONTACT_TO_EMAIL,
-      replyTo: email,
-      subject: `New Contact Message from ${name}`,
-      text: `Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}\n`,
-      html: `
-        <h2>New Contact Submission</h2>
-        <p><strong>Name:</strong> ${escape_html(name)}</p>
-        <p><strong>Email:</strong> ${escape_html(email)}</p>
-        <p>${escape_html(message).replace(/\n/g, "<br/>")}</p>
-      `,
-    });
-
-    return res.json({ success: true });
-  } catch (e: any) {
-    console.error("EMAIL ERROR:", e);
-    return res.status(500).json({ message: e?.message ?? "Email failed" });
-  }
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
 });
 
-function escape_html(input: string): string {
-  return input
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 /* ============================= */
-/* DEEPGRAM STT                  */
+/* GEMINI MODEL HELPERS          */
 /* ============================= */
 
-const deepgram = createClient(DEEPGRAM_API_KEY);
+type GeminiModelInfo = {
+  name?: string;
+  displayName?: string;
+  supportedGenerationMethods?: string[];
+};
 
-function pick_transcript(result: any): string {
-  const transcript =
-    result?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
-  return String(transcript).trim();
-}
-
-app.post(
-  "/api/stt",
-  upload.single("audio"),
-  async (req: Request, res: Response) => {
-    try {
-      const file = req.file;
-      if (!file) {
-        return res.status(400).json({
-          message: "No audio file uploaded. Field name must be 'audio'.",
-        });
-      }
-
-      // Pre-recorded transcription (send the file bytes). :contentReference[oaicite:1]{index=1}
-      // smart_format already enables punctuation. :contentReference[oaicite:2]{index=2}
-      const { result, error } =
-        await deepgram.listen.prerecorded.transcribeFile(file.buffer, {
-          model: DEEPGRAM_MODEL, // e.g. nova-2 :contentReference[oaicite:3]{index=3}
-          smart_format: true,
-          ...(DEEPGRAM_LANGUAGE ? { language: DEEPGRAM_LANGUAGE } : {}),
-        });
-
-      if (error) {
-        return res.status(500).json({
-          error: `Deepgram STT failed: ${error.message ?? "unknown error"}`,
-        });
-      }
-
-      return res.json({ text: pick_transcript(result) });
-    } catch (e: any) {
-      console.error("DEEPGRAM STT ERROR:", e);
-      return res.status(500).json({ error: e?.message ?? "STT failed" });
-    }
-  },
-);
-
-/* ============================= */
-/* GEMINI MINUTES                */
-/* ============================= */
-
-async function auto_pick_model(api_key: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${api_key}`;
-  const r = await fetch(url);
+async function list_models(api_key: string): Promise<GeminiModelInfo[]> {
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${api_key}`,
+  );
 
   if (!r.ok) {
     const txt = await r.text().catch(() => "");
@@ -224,20 +107,186 @@ async function auto_pick_model(api_key: string): Promise<string> {
 
   const json: any = await r.json().catch(() => ({}));
   const models: any[] = Array.isArray(json?.models) ? json.models : [];
-  const candidate = models.find(
-    (m) =>
-      Array.isArray(m?.supportedGenerationMethods) &&
-      m.supportedGenerationMethods.includes("generateContent"),
-  );
+  return models as GeminiModelInfo[];
+}
 
+function supports_generate_content(m: GeminiModelInfo): boolean {
+  return (
+    Array.isArray(m?.supportedGenerationMethods) &&
+    m.supportedGenerationMethods.includes("generateContent")
+  );
+}
+
+function normalize_model_name(name: string): string {
+  // API may return "models/xxx"
+  return String(name)
+    .replace(/^models\//, "")
+    .trim();
+}
+
+function pick_first_generate_content_model(models: GeminiModelInfo[]): string {
+  const candidate = models.find((m) => supports_generate_content(m) && m?.name);
   if (!candidate?.name) {
     throw new Error(
-      "No available Gemini models support generateContent for this API key.",
+      "No available Gemini model supports generateContent for this API key.",
     );
   }
-
-  return String(candidate.name).replace(/^models\//, "");
+  return normalize_model_name(candidate.name);
 }
+
+/**
+ * Pick a working model:
+ * - If preferred is provided, try it
+ * - Otherwise fallback to first model that supports generateContent
+ */
+async function resolve_model_name(
+  preferred: string | undefined,
+): Promise<string> {
+  const models = await list_models(GEMINI_API_KEY);
+
+  if (preferred) {
+    const preferred_norm = normalize_model_name(preferred);
+    const found = models.find(
+      (m) => normalize_model_name(m?.name ?? "") === preferred_norm,
+    );
+    if (found && supports_generate_content(found)) {
+      return preferred_norm;
+    }
+  }
+
+  return pick_first_generate_content_model(models);
+}
+
+/* ============================= */
+/* HEALTH                        */
+/* ============================= */
+
+app.get("/health", (_req: Request, res: Response) => {
+  res.json({ status: 200, message: "ok" });
+});
+
+app.get("/api/health", (_req: Request, res: Response) => {
+  res.json({ status: 200, message: "ok" });
+});
+
+/* ============================= */
+/* DEBUG: LIST AVAILABLE MODELS  */
+/* ============================= */
+
+app.get("/api/models", async (_req: Request, res: Response) => {
+  try {
+    const models = await list_models(GEMINI_API_KEY);
+    res.json(
+      models.map((m) => ({
+        name: m.name,
+        displayName: m.displayName,
+        supportedGenerationMethods: m.supportedGenerationMethods,
+      })),
+    );
+  } catch (err: any) {
+    console.error("LIST MODELS ERROR:", err);
+    res.status(500).json({ error: err?.message ?? "Failed to list models" });
+  }
+});
+
+/* ============================= */
+/* CONTACT EMAIL                 */
+/* ============================= */
+
+const mailer =
+  SMTP_USER && SMTP_PASS && CONTACT_TO_EMAIL
+    ? nodemailer.createTransport({
+        service: SMTP_SERVICE,
+        auth: { user: SMTP_USER, pass: SMTP_PASS },
+      })
+    : null;
+
+app.post("/api/contact", async (req: Request, res: Response) => {
+  try {
+    if (!mailer) {
+      return res.status(500).json({ message: "Email not configured" });
+    }
+
+    const name = String(req.body?.name ?? "").trim();
+    const email = String(req.body?.email ?? "").trim();
+    const message = String(req.body?.message ?? "").trim();
+
+    if (!name || !email || !message) {
+      return res.status(400).json({ message: "Missing fields" });
+    }
+
+    await mailer.sendMail({
+      from: `"SalitAI Contact" <${SMTP_USER}>`,
+      to: CONTACT_TO_EMAIL,
+      replyTo: email,
+      subject: `New Message from ${name}`,
+      text: message,
+    });
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error("CONTACT ERROR:", err);
+    return res.status(500).json({ error: err?.message ?? "Contact failed" });
+  }
+});
+
+/* ============================= */
+/* GEMINI AUDIO -> TEXT (STT)     */
+/* ============================= */
+
+app.post(
+  "/api/stt",
+  upload.single("audio"),
+  async (req: Request, res: Response) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          message: "No audio uploaded. Field name must be 'audio'.",
+        });
+      }
+
+      const audioBase64 = req.file.buffer.toString("base64");
+      const mimeType = String(req.file.mimetype || "application/octet-stream");
+
+      const model_name = await resolve_model_name(
+        GEMINI_MODEL_STT || undefined,
+      );
+      const model = genAI.getGenerativeModel({ model: model_name });
+
+      const result = await model.generateContent([
+        {
+          inlineData: {
+            data: audioBase64,
+            mimeType,
+          },
+        },
+        {
+          text: "Transcribe this audio accurately. Output plain text only. Do not add timestamps unless spoken.",
+        },
+      ]);
+
+      const text = result.response.text().trim();
+
+      return res.json({
+        text,
+        meta: {
+          mimeType,
+          model: model_name,
+        },
+      });
+    } catch (err: any) {
+      console.error("GEMINI STT ERROR:", err);
+      return res.status(500).json({
+        error: err?.message ?? "STT failed",
+        hint: "Try shorter audio clips if the file is large. Also check /api/models for available models.",
+      });
+    }
+  },
+);
+
+/* ============================= */
+/* GEMINI MINUTES                */
+/* ============================= */
 
 app.post("/api/minutes", async (req: Request, res: Response) => {
   try {
@@ -248,14 +297,14 @@ app.post("/api/minutes", async (req: Request, res: Response) => {
     const response_style = String(req.body?.response_style ?? "").trim();
     const directives = String(req.body?.directives ?? "").trim();
 
-    if (!transcript)
+    if (!transcript) {
       return res.status(400).json({ message: "Transcript required" });
+    }
 
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    let modelName = GEMINI_MODEL;
-    if (modelName === "auto") modelName = await auto_pick_model(GEMINI_API_KEY);
-
-    const model = genAI.getGenerativeModel({ model: modelName });
+    const model_name = await resolve_model_name(
+      GEMINI_MODEL_MINUTES || undefined,
+    );
+    const model = genAI.getGenerativeModel({ model: model_name });
 
     const prompt = `
 You are a professional meeting secretary.
@@ -286,9 +335,15 @@ ${transcript}
 `.trim();
 
     const result = await model.generateContent(prompt);
-    return res.json({ minutes: result.response.text(), model_used: modelName });
-  } catch (e: any) {
-    return res.status(500).json({ error: e?.message ?? "Minutes failed" });
+    const minutes = result.response.text();
+
+    return res.json({
+      minutes,
+      meta: { model: model_name },
+    });
+  } catch (err: any) {
+    console.error("GEMINI MINUTES ERROR:", err);
+    return res.status(500).json({ error: err?.message ?? "Minutes failed" });
   }
 });
 
@@ -297,5 +352,5 @@ ${transcript}
 /* ============================= */
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Backend running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
