@@ -1,10 +1,15 @@
 {
   "name": "salitai_backend",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts"
+    "dev": "tsx watch src/index.new.ts",
+    "dev:old": "tsx watch src/server.ts",
+    "start": "node dist/index.new.js",
+    "build": "tsc",
+    "test": "echo \"Tests coming soon\" && exit 0",
+    "check-models": "node scripts/check-models.js"
   },
   "dependencies": {
     "@deepgram/sdk": "^4.11.3",
